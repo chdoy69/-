@@ -1,951 +1,1103 @@
 <!--
-YouTube 채널/영상 검색 & 상세조회 (단일 HTML, 순수 JS/CSS)
-
 [사용법]
-1) Google Cloud Console에서 프로젝트 생성 → "YouTube Data API v3" 사용 설정
-2) API 키 발급(가능하면 HTTP referrer 제한을 설정)
-3) 이 파일(index.html)을 열고, 상단에 API 키 입력 후 저장
-4) 검색어 입력 → "검색" 클릭
-5) 결과가 있으면 "다운로드" 버튼으로 CSV 저장
+1) Google Cloud Console에서 YouTube Data API v3 활성화 → API Key 발급
+2) 이 페이지에 API Key 입력 후 “키 저장” (로컬스토리지에 저장됨)
+3) 검색어 입력 → 검색
+4) 필터: 숏폼/롱폼(60초 기준), 기간(업로드), 구독자 대비 조회수 비율(5단계)
+5) “엑셀로 저장(한글 OK)” 버튼: CSV(UTF-8 BOM 포함)로 다운로드 → Excel에서 한글 깨짐 방지
 
 [주의]
-- search.list 결과에는 tags가 포함되지 않습니다. 이 앱은 검색 후 videoId/channelId를 모아
-  videos.list/channels.list를 추가 호출해 tags/통계 등을 합칩니다.
-- 일부 환경에서는 file://에서 호출이 제한될 수 있습니다. 가능하면 GitHub Pages 등 https에서 사용하세요.
+- search.list에는 tags/statistics/duration이 없다.
+  반드시 search.list → videos.list로 태그/통계/길이 합치고,
+  channelId를 모아 channels.list로 subscriberCount를 가져와 ratio(view/subs)를 계산한다.
+- GitHub Pages(https)에서 실행 권장. (file:// 환경은 브라우저에 따라 제한될 수 있음)
 -->
 
 <!doctype html>
 <html lang="ko">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>YouTube 채널/영상 조회 (YouTube Data API v3)</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>YouTube 영상 조회 + 필터/내보내기 (단일 HTML)</title>
   <style>
     :root{
-      --bg:#0b0f14;
-      --panel:#101826;
-      --card:#121f33;
-      --muted:#8aa0b8;
-      --text:#eaf1ff;
-      --line:#24364f;
-      --good:#4ade80;
-      --warn:#fbbf24;
-      --bad:#fb7185;
-      --shadow: 0 10px 25px rgba(0,0,0,.35);
-      --radius: 14px;
+      --bg:#0b1020; --panel:#0f1733; --card:#121b3b;
+      --text:#e8ecff; --muted:#9fb0ff; --sub:#c9d2ff;
+      --line:rgba(255,255,255,.12); --acc:#6aa6ff;
+      --bad:#ff6a6a; --ok:#53e3a6; --warn:#ffd36a;
+      --shadow: 0 10px 30px rgba(0,0,0,.35);
+      --r:16px; --r2:22px;
     }
     *{box-sizing:border-box}
     body{
       margin:0;
-      background: radial-gradient(1200px 600px at 10% 0%, rgba(59,130,246,.18), transparent 60%),
-                  radial-gradient(900px 500px at 100% 20%, rgba(16,185,129,.12), transparent 55%),
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans KR", Arial;
+      background: radial-gradient(1000px 600px at 10% 10%, rgba(106,166,255,.18), transparent 60%),
+                  radial-gradient(900px 600px at 80% 20%, rgba(83,227,166,.12), transparent 55%),
                   var(--bg);
       color:var(--text);
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans KR", Apple SD Gothic Neo, "Malgun Gothic", sans-serif;
-      line-height:1.35;
     }
-    a{color:#93c5fd; text-decoration:none}
+    a{color:var(--acc); text-decoration:none}
     a:hover{text-decoration:underline}
-    .wrap{max-width:1200px; margin:0 auto; padding:22px 16px 64px}
-    header{
-      display:flex; gap:14px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap;
-      margin-bottom:14px;
-    }
-    .title{display:flex; flex-direction:column; gap:6px;}
-    .title h1{font-size:18px; margin:0; letter-spacing:.2px;}
-    .title p{margin:0; color:var(--muted); font-size:13px;}
 
-    .toolbar{
-      width:100%;
-      background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
-      border:1px solid var(--line);
-      border-radius: var(--radius);
-      padding:14px;
-      box-shadow: var(--shadow);
-      display:grid;
-      grid-template-columns: 1.2fr 1fr 1fr 1fr;
-      gap:12px;
-      align-items:end;
-    }
-    @media (max-width: 980px){ .toolbar{grid-template-columns:1fr 1fr} }
-    @media (max-width: 640px){ .toolbar{grid-template-columns:1fr} }
+    .wrap{max-width:1200px; margin:0 auto; padding:16px 16px 36px;}
+    h1{margin:0; font-size:18px; letter-spacing:-.3px}
+    .hint{color:var(--muted); font-size:12px; line-height:1.45; margin-top:6px}
 
-    .field{display:flex; flex-direction:column; gap:6px;}
-    .label{
-      font-size:12px; color:var(--muted);
-      display:flex; justify-content:space-between; align-items:center; gap:10px;
+    .sticky{
+      position:sticky; top:0; z-index:10;
+      background: rgba(11,16,32,.75);
+      backdrop-filter: blur(10px);
+      border-bottom:1px solid var(--line);
+      box-shadow: 0 8px 24px rgba(0,0,0,.25);
+      padding:10px 0;
+      margin-bottom:12px;
     }
-    input[type="text"], input[type="password"], select{
-      width:100%;
-      padding:10px 11px;
-      border-radius:12px;
+    .sticky .inner{max-width:1200px; margin:0 auto; padding:0 16px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;}
+    .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center}
+    .pill{
+      display:inline-flex; gap:8px; align-items:center;
+      padding:6px 10px; border-radius:999px;
       border:1px solid var(--line);
-      background:#0c1422;
-      color:var(--text);
-      outline:none;
+      background:rgba(18,27,59,.55);
+      color:var(--sub); font-size:12px;
     }
-    input::placeholder{color:#5f7894}
-    .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center;}
+    .pill strong{color:var(--text)}
 
     .btn{
-      padding:10px 12px;
-      border-radius:12px;
-      border:1px solid rgba(147,197,253,.18);
-      background: linear-gradient(180deg, rgba(59,130,246,.18), rgba(59,130,246,.08));
-      color:var(--text);
-      cursor:pointer;
-      user-select:none;
-    }
-    .btn:hover{filter:brightness(1.06)}
-    .btn.secondary{
-      background: linear-gradient(180deg, rgba(148,163,184,.16), rgba(148,163,184,.06));
-      border-color: rgba(148,163,184,.18);
-    }
-    .btn.danger{
-      background: linear-gradient(180deg, rgba(244,63,94,.18), rgba(244,63,94,.06));
-      border-color: rgba(244,63,94,.2);
-    }
-
-    .tabs{
-      display:flex; gap:8px; align-items:center;
-      padding:4px;
-      border-radius: 999px;
-      background: rgba(255,255,255,.03);
       border:1px solid var(--line);
-      width:fit-content;
-    }
-    .tab{
-      padding:8px 12px;
-      border-radius: 999px;
-      font-size:13px;
-      color:var(--muted);
-      cursor:pointer;
-      border:1px solid transparent;
-    }
-    .tab.active{
+      background:rgba(18,27,59,.70);
       color:var(--text);
-      background: rgba(59,130,246,.18);
-      border-color: rgba(59,130,246,.25);
+      padding:9px 12px;
+      border-radius:12px;
+      cursor:pointer;
+      font-weight:900;
+      display:inline-flex; align-items:center; gap:8px;
+      box-shadow: var(--shadow);
     }
+    .btn:hover{border-color:rgba(255,255,255,.22)}
+    .btn.primary{background:rgba(106,166,255,.18); border-color:rgba(106,166,255,.35)}
+    .btn.danger{background:rgba(255,106,106,.14); border-color:rgba(255,106,106,.35)}
+    .btn.ghost{box-shadow:none; background:transparent}
+    .btn:disabled{opacity:.45; cursor:not-allowed; box-shadow:none}
 
-    .statusbar{
-      margin-top:12px;
-      display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;
-      color:var(--muted);
-      font-size:13px;
-    }
-
-    .grid{
-      margin-top:14px;
-      display:grid;
-      grid-template-columns: 1.7fr 1fr;
-      gap:14px;
-      align-items:start;
-    }
-    @media (max-width: 980px){ .grid{grid-template-columns:1fr} }
+    .grid{display:grid; grid-template-columns: 1.1fr .9fr; gap:12px; align-items:start;}
+    @media (max-width:980px){.grid{grid-template-columns:1fr}}
 
     .panel{
-      background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
       border:1px solid var(--line);
-      border-radius: var(--radius);
+      background: rgba(15,23,51,.65);
+      border-radius: var(--r2);
       box-shadow: var(--shadow);
       overflow:hidden;
     }
-    .panel h2{
-      margin:0;
-      font-size:14px;
+    .panel .hd{
       padding:12px 14px;
       border-bottom:1px solid var(--line);
-      color:#cfe0ff;
-      display:flex; justify-content:space-between; align-items:center;
-      gap:10px;
+      background: rgba(18,27,59,.55);
+      display:flex; justify-content:space-between; align-items:center; gap:10px;
     }
-    .panel .body{padding:12px 14px}
+    .panel .hd .title{font-weight:950; font-size:14px}
+    .panel .bd{padding:14px}
 
-    .msg{
-      border-radius: 12px;
+    label{display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--muted)}
+    input, select{
+      width:100%;
       border:1px solid var(--line);
-      padding:10px 12px;
-      background: rgba(255,255,255,.02);
-      color: var(--muted);
-      white-space:pre-wrap;
+      background: rgba(18,27,59,.65);
+      color:var(--text);
+      padding:10px 11px;
+      border-radius:12px;
+      outline:none;
     }
-    .msg.good{border-color: rgba(74,222,128,.25); color:#bff3d1; background: rgba(74,222,128,.06)}
-    .msg.warn{border-color: rgba(251,191,36,.25); color:#ffe2a0; background: rgba(251,191,36,.06)}
-    .msg.bad{border-color: rgba(251,113,133,.25); color:#ffd0d8; background: rgba(251,113,133,.06)}
+    input:focus, select:focus{border-color:rgba(106,166,255,.45)}
+    .fields{display:grid; grid-template-columns: 1fr 1fr; gap:10px;}
+    @media (max-width:680px){.fields{grid-template-columns:1fr}}
+    .small{font-size:12px; color:var(--muted); line-height:1.45}
 
-    .spin{
-      display:inline-block;
-      width:14px; height:14px;
-      border-radius:999px;
-      border:2px solid rgba(255,255,255,.18);
-      border-top-color: rgba(147,197,253,.85);
-      animation: r 0.8s linear infinite;
-      vertical-align:-2px;
-      margin-right:8px;
-    }
-    @keyframes r{to{transform:rotate(360deg)}}
-
-    .cards{display:flex; flex-direction:column; gap:10px;}
-    .card{
-      display:grid;
-      grid-template-columns: 120px 1fr;
-      gap:12px;
-      padding:12px;
-      background: rgba(255,255,255,.02);
-      border:1px solid var(--line);
+    .notice{
+      border:1px dashed rgba(255,255,255,.22);
+      background: rgba(255,211,106,.10);
       border-radius: 14px;
-      cursor:pointer;
-      transition: transform .08s ease, border-color .08s ease, background .08s ease;
+      padding:10px 12px;
+      color:#ffe7b3; font-size:12px; line-height:1.45;
     }
-    .card:hover{transform: translateY(-1px); border-color: rgba(147,197,253,.25); background: rgba(59,130,246,.06)}
-    .thumb{
-      width:120px; height:68px; border-radius:12px; overflow:hidden;
-      background:#081022;
-      border:1px solid rgba(255,255,255,.06);
-      display:flex; align-items:center; justify-content:center;
-      color:rgba(255,255,255,.35);
-      font-size:12px;
-    }
-    .thumb img{width:100%; height:100%; object-fit:cover; display:block}
-    .meta{display:flex; flex-direction:column; gap:6px; min-width:0}
-    .card .t{
-      font-size:14px; margin:0; color:var(--text);
-      display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient: vertical; overflow:hidden;
-    }
-    .sub{
-      font-size:12px; color:var(--muted);
-      display:flex; gap:10px; flex-wrap:wrap;
-    }
-    .desc{
-      font-size:12px; color:#b4c6dc;
-      display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient: vertical; overflow:hidden;
-      opacity:.9;
-    }
-    .pillrow{display:flex; gap:6px; flex-wrap:wrap; margin-top:4px}
-    .pill{
-      font-size:11px;
-      padding:4px 8px;
-      border-radius:999px;
-      border:1px solid rgba(148,163,184,.18);
-      background: rgba(148,163,184,.06);
-      color:#d5e6ff;
-      max-width:100%;
-      overflow:hidden;
-      text-overflow:ellipsis;
-      white-space:nowrap;
+    .err{
+      border:1px dashed rgba(255,106,106,.35);
+      background: rgba(255,106,106,.10);
+      border-radius:14px;
+      padding:10px 12px;
+      color:#ffd0d0; font-size:12px; line-height:1.45;
     }
 
-    .kv{
-      display:grid;
-      grid-template-columns: 120px 1fr;
-      gap:10px 12px;
-      font-size:13px;
-      margin:0;
-    }
-    .k{color:var(--muted)}
-    .v{color:var(--text); overflow-wrap:anywhere}
-    .hr{height:1px; background:var(--line); margin:12px 0}
-    pre{
-      margin:0;
-      padding:12px;
-      border-radius: 12px;
+    .list{display:grid; gap:10px;}
+    .card{
       border:1px solid var(--line);
-      background:#071023;
-      max-height: 360px;
-      overflow:auto;
-      color:#cfe0ff;
-      font-size:12px;
+      background: rgba(18,27,59,.62);
+      border-radius: var(--r2);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+      display:grid;
+      grid-template-columns: 168px 1fr;
+      cursor:pointer;
     }
-    .footerbar{
+    @media (max-width:680px){.card{grid-template-columns:120px 1fr}}
+    .thumb{background: rgba(0,0,0,.25); overflow:hidden}
+    .thumb img{width:100%; height:100%; object-fit:cover; display:block}
+    .meta{padding:12px; display:flex; flex-direction:column; gap:8px}
+    .titleline{font-weight:950; font-size:14px; line-height:1.35}
+    .subline{color:var(--muted); font-size:12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center}
+    .desc{color:var(--sub); font-size:12px; line-height:1.45; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden}
+    .chips{display:flex; gap:6px; flex-wrap:wrap}
+    .chip{
+      font-size:11px; padding:5px 8px; border-radius:999px;
+      border:1px solid var(--line); background: rgba(15,23,51,.65);
+      color:var(--sub);
+    }
+    .chip.acc{border-color: rgba(106,166,255,.35); background: rgba(106,166,255,.12); color:#d3e6ff}
+    .chip.ok{border-color: rgba(83,227,166,.35); background: rgba(83,227,166,.12); color:#c9ffe9}
+    .chip.warn{border-color: rgba(255,211,106,.35); background: rgba(255,211,106,.12); color:#ffe7b3}
+    .chip.bad{border-color: rgba(255,106,106,.35); background: rgba(255,106,106,.12); color:#ffd0d0}
+
+    .statrow{display:flex; gap:8px; flex-wrap:wrap}
+    .stat{
+      font-size:12px; color:var(--sub);
+      border:1px solid var(--line);
+      background: rgba(15,23,51,.55);
+      padding:6px 9px; border-radius:12px;
+    }
+
+    .right{position:sticky; top:84px; align-self:start;}
+    @media (max-width:980px){.right{position:relative; top:auto}}
+
+    .detailTitle{font-weight:950; font-size:15px; line-height:1.35; margin:0 0 6px}
+    .kv{display:grid; grid-template-columns: 130px 1fr; gap:6px; font-size:12px}
+    .kv div{padding:6px 0; border-bottom:1px solid rgba(255,255,255,.08)}
+    .kv .k{color:var(--muted)}
+    .kv .v{color:var(--text); word-break:break-word}
+
+    .json{
       margin-top:10px;
-      display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;
+      border:1px solid var(--line);
+      background: rgba(0,0,0,.28);
+      border-radius:14px;
+      padding:10px;
+      max-height:260px;
+      overflow:auto;
+      white-space:pre;
+      font-size:11px;
+      color:#dbe3ff;
+      display:none;
     }
-    .small{font-size:12px; color:var(--muted)}
-    label.row{user-select:none}
+
+    .spinner{
+      width:18px; height:18px;
+      border:2px solid rgba(255,255,255,.20);
+      border-top-color: rgba(106,166,255,.85);
+      border-radius:999px;
+      animation: spin 0.8s linear infinite;
+      display:none;
+    }
+    @keyframes spin {to{transform:rotate(360deg)}}
   </style>
 </head>
-
 <body>
-  <div class="wrap">
-    <header>
-      <div class="title">
-        <h1>유튜브 채널/영상 조회기 (YouTube Data API v3)</h1>
-        <p>검색 → IDs 묶음 조회(videos.list / channels.list) → 태그/통계/상세 합치기</p>
-      </div>
-      <div class="row">
-        <button class="btn secondary" id="helpBtn">도움말</button>
-      </div>
-    </header>
 
-    <section class="toolbar">
-      <div class="field">
-        <div class="label"><span>API 키</span><span>로컬 저장 가능</span></div>
-        <div class="row" style="gap:8px">
-          <input id="apiKey" type="password" placeholder="YouTube Data API 키 입력" autocomplete="off" />
-          <button class="btn" id="saveKeyBtn" style="white-space:nowrap">저장</button>
-          <button class="btn danger" id="clearKeyBtn" style="white-space:nowrap">삭제</button>
-        </div>
-        <div class="small">키는 이 브라우저의 로컬스토리지에만 저장됩니다.</div>
-      </div>
+<div class="sticky">
+  <div class="inner">
+    <div>
+      <h1>YouTube 영상 조회 + 필터/내보내기</h1>
+      <div class="hint">검색 → tags/statistics/duration(videos.list) + subscriberCount(channels.list) 합쳐서 표시 · CSV(UTF-8 BOM)로 “엑셀 한글 깨짐 방지”</div>
+    </div>
 
-      <div class="field">
-        <div class="label"><span>검색 종류</span><span>탭 선택</span></div>
-        <div class="tabs" role="tablist" aria-label="검색 종류">
-          <div class="tab active" id="tabVideo" role="tab" aria-selected="true" tabindex="0" data-type="video">영상</div>
-          <div class="tab" id="tabChannel" role="tab" aria-selected="false" tabindex="0" data-type="channel">채널</div>
-        </div>
-      </div>
-
-      <div class="field">
-        <div class="label"><span>검색어</span><span>예: AI, 브루</span></div>
-        <input id="q" type="text" placeholder="검색어 입력" />
-      </div>
-
-      <div class="field">
-        <div class="label"><span>옵션</span><span>정렬/개수</span></div>
-        <div class="row">
-          <select id="order">
-            <option value="relevance">관련도</option>
-            <option value="date">최신순</option>
-            <option value="viewCount">조회수(영상 위주)</option>
-            <option value="rating">평점</option>
-            <option value="title">제목</option>
-          </select>
-          <select id="maxResults" style="min-width:120px">
-            <option value="10">10개</option>
-            <option value="25" selected>25개</option>
-            <option value="50">50개</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="field" style="grid-column: 1 / -1">
-        <div class="row" style="justify-content:space-between; gap:10px">
-          <div class="row">
-            <button class="btn" id="searchBtn">검색</button>
-            <button class="btn secondary" id="nextBtn" disabled>다음 페이지</button>
-            <button class="btn secondary" id="prevBtn" disabled>이전 페이지</button>
-
-            <!-- ✅ 변경: 검색 전에도 항상 보이게 + 항상 클릭 가능 -->
-            <button class="btn secondary" id="exportBtn">다운로드</button>
-          </div>
-          <div class="row">
-            <label class="row" style="gap:8px; cursor:pointer;">
-              <input id="jsonToggle" type="checkbox" />
-              <span class="small">JSON 보기</span>
-            </label>
-          </div>
-        </div>
-
-        <div class="statusbar">
-          <div id="statusText">대기 중</div>
-          <div class="small" id="countText">결과: -</div>
-        </div>
-
-        <div id="message" class="msg" style="margin-top:10px; display:none"></div>
-      </div>
-    </section>
-
-    <section class="grid">
-      <div class="panel">
-        <h2>
-          <span>결과 목록</span>
-          <span class="small" id="resultHint">카드를 클릭하면 상세가 표시됩니다.</span>
-        </h2>
-        <div class="body">
-          <div id="cards" class="cards"></div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <h2>
-          <span>상세 패널</span>
-          <span class="small" id="detailHint">선택한 항목 없음</span>
-        </h2>
-        <div class="body">
-          <div id="detail" class="msg">왼쪽 목록에서 항목을 선택하세요.</div>
-          <div id="jsonWrap" style="display:none; margin-top:12px">
-            <div class="hr"></div>
-            <div class="small" style="margin-bottom:8px">원본/합쳐진 JSON</div>
-            <pre id="jsonPre">{}</pre>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <div class="footerbar">
-      <div class="small">
-        요청 최적화: <span class="pill">search.list → IDs 모음 → videos.list/channels.list(배치)</span>
-      </div>
-      <div class="small">
-        팁: API 키는 가능한 한 제한(Referrer/IP)하세요.
-      </div>
+    <div class="row">
+      <button class="btn" id="exportBtn" title="현재 필터 적용 결과를 엑셀(CSV)로 저장">
+        ⬇️ 엑셀로 저장(한글 OK)
+      </button>
+      <button class="btn" id="viewToggleBtn">카드/테이블</button>
+      <button class="btn ghost" id="jsonToggleBtn">JSON 보기</button>
+      <span class="pill" id="countPill"><strong>0</strong>개</span>
+      <span class="pill" id="statusPill">대기</span>
     </div>
   </div>
+</div>
 
-  <script>
-    const YT_BASE = "https://www.googleapis.com/youtube/v3";
+<div class="wrap">
+  <div class="grid">
+    <!-- LEFT -->
+    <div class="panel">
+      <div class="hd">
+        <div class="title">검색 / 필터</div>
+        <div class="row">
+          <button class="btn ghost" id="resetBtn">초기화</button>
+        </div>
+      </div>
+      <div class="bd">
 
-    let activeType = "video";
-    let pageToken = "";
-    let nextPageToken = "";
-    let prevPageToken = "";
-    let lastCombinedPayload = null;
-    let currentResults = [];
+        <div class="fields">
+          <label>
+            YouTube API Key
+            <input id="apiKey" placeholder="AIza..." autocomplete="off"/>
+            <div class="row">
+              <button class="btn primary" id="saveKeyBtn">키 저장</button>
+              <button class="btn danger" id="delKeyBtn">키 삭제</button>
+            </div>
+            <div class="small">권장: Google Cloud Console에서 HTTP referrer 제한에 GitHub Pages 도메인 등록</div>
+          </label>
 
-    const el = (id) => document.getElementById(id);
+          <label>
+            검색어
+            <input id="query" placeholder="예) AI, 뇌과학, 쇼츠" />
+            <div class="small">※ 채널/영상 둘 다 가능하지만, 필터 정확도는 영상 검색이 가장 좋습니다.</div>
+          </label>
+        </div>
 
-    const apiKeyInput = el("apiKey");
-    const saveKeyBtn = el("saveKeyBtn");
-    const clearKeyBtn = el("clearKeyBtn");
+        <div style="height:10px"></div>
 
-    const tabVideo = el("tabVideo");
-    const tabChannel = el("tabChannel");
+        <div class="fields">
+          <label>
+            결과 수(페이지)
+            <select id="maxResults">
+              <option value="10">10</option>
+              <option value="25" selected>25</option>
+              <option value="50">50</option>
+            </select>
+          </label>
 
-    const qInput = el("q");
-    const orderSel = el("order");
-    const maxResultsSel = el("maxResults");
+          <label>
+            정렬
+            <select id="sortMode">
+              <option value="published_desc" selected>업로드 최신순</option>
+              <option value="views_desc">조회수 높은순</option>
+              <option value="ratio_desc">ratio 높은순</option>
+              <option value="likes_desc">좋아요 높은순</option>
+            </select>
+          </label>
 
-    const searchBtn = el("searchBtn");
-    const nextBtn = el("nextBtn");
-    const prevBtn = el("prevBtn");
-    const exportBtn = el("exportBtn");
-    const jsonToggle = el("jsonToggle");
+          <label>
+            숏폼/롱폼
+            <select id="lenFilter">
+              <option value="all" selected>전체</option>
+              <option value="short">숏폼 (60초 미만)</option>
+              <option value="long">롱폼 (60초 이상)</option>
+            </select>
+          </label>
 
-    const statusText = el("statusText");
-    const countText = el("countText");
-    const messageBox = el("message");
-    const cardsWrap = el("cards");
+          <label>
+            기간(업로드)
+            <select id="periodFilter">
+              <option value="all" selected>전체</option>
+              <option value="1m">1개월</option>
+              <option value="2m">2개월</option>
+              <option value="6m">6개월</option>
+              <option value="1y">1년</option>
+            </select>
+          </label>
 
-    const detailWrap = el("detail");
-    const detailHint = el("detailHint");
-    const jsonWrap = el("jsonWrap");
-    const jsonPre = el("jsonPre");
+          <label>
+            구독자 대비 조회수(5단계)
+            <select id="ratioTierFilter">
+              <option value="all" selected>전체</option>
+              <option value="1">1단계 (ratio &lt; 0.25)</option>
+              <option value="2">2단계 (0.25 ~ 0.75)</option>
+              <option value="3">3단계 (0.75 ~ 1.25)  ← 1:1 근처</option>
+              <option value="4">4단계 (1.25 ~ 3)</option>
+              <option value="5">5단계 (ratio ≥ 3)  ← 엄청 잘 나옴</option>
+              <option value="na">계산불가</option>
+            </select>
+          </label>
 
-    function setMessage(type, text) {
-      if (!text) {
-        messageBox.style.display = "none";
-        messageBox.textContent = "";
-        messageBox.className = "msg";
-        return;
+          <label>
+            (선택) 검색 타입
+            <select id="searchType">
+              <option value="video" selected>영상(video)</option>
+              <option value="channel">채널(channel)</option>
+            </select>
+          </label>
+        </div>
+
+        <div style="height:12px"></div>
+
+        <div class="row" style="justify-content:space-between">
+          <div class="row">
+            <button class="btn primary" id="searchBtn">
+              <span class="spinner" id="spin"></span>
+              검색
+            </button>
+            <button class="btn" id="applyBtn">필터 적용</button>
+          </div>
+          <div class="row">
+            <button class="btn" id="prevBtn" disabled>이전 페이지</button>
+            <button class="btn" id="nextBtn" disabled>다음 페이지</button>
+          </div>
+        </div>
+
+        <div id="helpBox" class="notice" style="margin-top:12px; display:none"></div>
+        <div id="errBox" class="err" style="margin-top:12px; display:none"></div>
+        <div id="jsonBox" class="json"></div>
+      </div>
+    </div>
+
+    <!-- RIGHT -->
+    <div class="panel right">
+      <div class="hd">
+        <div class="title">결과 목록</div>
+        <div class="row">
+          <button class="btn ghost" id="copyUrlBtn">선택 URL 복사</button>
+        </div>
+      </div>
+      <div class="bd">
+        <div id="list" class="list"></div>
+
+        <div style="height:10px"></div>
+
+        <div class="panel" style="border-radius:16px; box-shadow:none">
+          <div class="hd">
+            <div class="title">상세</div>
+            <div class="row">
+              <button class="btn ghost" id="closeDetailBtn">닫기</button>
+            </div>
+          </div>
+          <div class="bd" id="detail">
+            <div class="small">목록에서 항목을 클릭하면 상세가 표시됩니다.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+(() => {
+  // ====== State ======
+  let viewMode = "card"; // card | table
+  let itemsAll = [];
+  let itemsFiltered = [];
+  let selected = null;
+  let lastRaw = null;
+
+  const page = { next:null, prev:null, lastDirection:"new" };
+
+  // ====== Helpers ======
+  const $ = (s)=>document.querySelector(s);
+  const LS_KEY = "ytViewer.key.v1";
+
+  function setStatus(text, kind=""){
+    const p = $("#statusPill");
+    p.textContent = text;
+    p.style.borderColor =
+      kind==="ok" ? "rgba(83,227,166,.35)" :
+      kind==="err" ? "rgba(255,106,106,.35)" :
+      kind==="warn"? "rgba(255,211,106,.35)" :
+      "rgba(255,255,255,.12)";
+    p.style.background =
+      kind==="ok" ? "rgba(83,227,166,.10)" :
+      kind==="err" ? "rgba(255,106,106,.10)" :
+      kind==="warn"? "rgba(255,211,106,.10)" :
+      "rgba(18,27,59,.55)";
+  }
+
+  function showErr(msg){
+    $("#errBox").style.display = "";
+    $("#errBox").textContent = msg;
+  }
+  function hideErr(){ $("#errBox").style.display="none"; $("#errBox").textContent=""; }
+
+  function showHelp(html){
+    $("#helpBox").style.display = "";
+    $("#helpBox").innerHTML = html;
+  }
+  function hideHelp(){ $("#helpBox").style.display="none"; $("#helpBox").innerHTML=""; }
+
+  function esc(s){
+    return String(s ?? "")
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+  }
+
+  function fmtNum(n){
+    const x = Number(n);
+    if(!Number.isFinite(x)) return "-";
+    return x.toLocaleString("ko-KR");
+  }
+  function toDate(s){
+    const d = new Date(s);
+    return Number.isFinite(d.getTime()) ? d : null;
+  }
+  function fmtDate(d){
+    if(!d) return "-";
+    return d.toISOString().slice(0,10);
+  }
+  function clampStr(s, max=160){
+    if(!s) return "";
+    s = String(s).replace(/\s+/g," ").trim();
+    return s.length > max ? s.slice(0,max-1) + "…" : s;
+  }
+
+  function parseISODurationToSeconds(iso){
+    if(!iso || typeof iso !== "string") return null;
+    const m = iso.match(/P(?:([\d.]+)D)?T?(?:([\d.]+)H)?(?:([\d.]+)M)?(?:([\d.]+)S)?/);
+    if(!m) return null;
+    const days = parseFloat(m[1]||"0");
+    const h = parseFloat(m[2]||"0");
+    const min = parseFloat(m[3]||"0");
+    const sec = parseFloat(m[4]||"0");
+    const total = Math.round(days*86400 + h*3600 + min*60 + sec);
+    return Number.isFinite(total) ? total : null;
+  }
+  function fmtSeconds(sec){
+    if(sec == null || !Number.isFinite(sec)) return "-";
+    const s = Math.max(0, Math.floor(sec));
+    const h = Math.floor(s/3600);
+    const m = Math.floor((s%3600)/60);
+    const r = s%60;
+    if(h>0) return `${h}:${String(m).padStart(2,"0")}:${String(r).padStart(2,"0")}`;
+    return `${m}:${String(r).padStart(2,"0")}`;
+  }
+
+  function getPeriodStart(period){
+    if(period === "all") return null;
+    const now = new Date();
+    const d = new Date(now);
+    if(period === "1m") d.setMonth(d.getMonth()-1);
+    if(period === "2m") d.setMonth(d.getMonth()-2);
+    if(period === "6m") d.setMonth(d.getMonth()-6);
+    if(period === "1y") d.setFullYear(d.getFullYear()-1);
+    return d;
+  }
+
+  const RATIO_BANDS = [
+    {tier:1, min:-Infinity, max:0.25},
+    {tier:2, min:0.25, max:0.75},
+    {tier:3, min:0.75, max:1.25},
+    {tier:4, min:1.25, max:3},
+    {tier:5, min:3, max:Infinity},
+  ];
+  function calcRatioTier(viewCount, subs){
+    const v = Number(viewCount);
+    const s = Number(subs);
+    if(!Number.isFinite(v) || !Number.isFinite(s) || s <= 0) return {ratio:null, tier:null};
+    const ratio = v / s;
+    const band = RATIO_BANDS.find(b => ratio >= b.min && ratio < b.max);
+    return {ratio, tier: band ? band.tier : null};
+  }
+
+  function chip(label, cls=""){
+    const span = document.createElement("span");
+    span.className = "chip " + cls;
+    span.textContent = label;
+    return span;
+  }
+
+  function ratioChip(tier, ratio){
+    if(tier == null) return chip("계산불가", "bad");
+    const t = Number(tier);
+    const cls = t===5 ? "ok" : (t===4 ? "warn" : (t===3 ? "acc" : ""));
+    const val = Number.isFinite(ratio) ? ` (${ratio.toFixed(2)})` : "";
+    return chip(`ratio ${t}단계${val}`, cls);
+  }
+
+  function lenChip(sec){
+    if(sec == null || !Number.isFinite(sec)) return chip("길이없음", "bad");
+    return sec < 60 ? chip(`숏폼 ${fmtSeconds(sec)}`, "acc") : chip(`롱폼 ${fmtSeconds(sec)}`);
+  }
+
+  async function fetchJSON(url, opts={}, timeoutMs=20000){
+    const ctrl = new AbortController();
+    const id = setTimeout(()=>ctrl.abort(), timeoutMs);
+    try{
+      const res = await fetch(url, {...opts, signal: ctrl.signal});
+      const text = await res.text();
+      let json = null;
+      try{ json = text ? JSON.parse(text) : null; } catch {}
+      if(!res.ok){
+        const msg = json?.error?.message || json?.message || `${res.status} ${res.statusText}`;
+        const reason = json?.error?.errors?.[0]?.reason || "";
+        return {ok:false, status:res.status, msg, reason, json, raw:text};
       }
-      messageBox.style.display = "block";
-      messageBox.textContent = text;
-      messageBox.className = "msg " + (type || "");
+      return {ok:true, status:res.status, json: json ?? {}, raw:text};
+    } catch(e){
+      const aborted = String(e?.name)==="AbortError";
+      return {ok:false, status:0, msg: aborted ? "요청 시간이 초과되었어요(Timeout)." : ("네트워크 오류 / CORS 차단 가능: " + (e?.message||e)), reason:"", json:null};
+    } finally {
+      clearTimeout(id);
     }
+  }
 
-    function escapeHtml(s){
-      return String(s ?? "")
-        .replaceAll("&","&amp;")
-        .replaceAll("<","&lt;")
-        .replaceAll(">","&gt;")
-        .replaceAll('"',"&quot;")
-        .replaceAll("'","&#39;");
-    }
+  function classifyYtError(res){
+    const message = res.msg || "오류가 발생했습니다.";
+    const reason = res.reason || "";
+    if(res.status === 403 && /quota/i.test(message)) return "할당량(quota) 초과로 보입니다. 내일 다시 시도하거나, 다른 키/프로젝트를 사용하세요.";
+    if(reason === "keyInvalid") return "API Key가 잘못되었습니다. 키를 다시 확인하세요.";
+    if(reason === "accessNotConfigured") return "API가 프로젝트에서 활성화되지 않았습니다. Google Cloud Console에서 YouTube Data API v3를 활성화하세요.";
+    if(/referrer/i.test(message)) return "키 제한(HTTP referrer) 때문에 차단된 것 같습니다. GitHub Pages 도메인을 허용 목록에 추가하세요.";
+    return `YouTube API 오류: ${message}`;
+  }
 
-    function setStatus(text, spinning=false) {
-      statusText.innerHTML = spinning ? `<span class="spin"></span>${escapeHtml(text)}` : escapeHtml(text);
-    }
+  function ytKey(){ return $("#apiKey").value.trim(); }
+  function withKey(u){
+    const k = ytKey();
+    if(!k) return null;
+    const url = new URL(u);
+    url.searchParams.set("key", k);
+    return url.toString();
+  }
 
-    function fmtDate(iso) {
-      if (!iso) return "-";
-      try {
-        const d = new Date(iso);
-        const yyyy = d.getFullYear();
-        const mm = String(d.getMonth()+1).padStart(2,"0");
-        const dd = String(d.getDate()).padStart(2,"0");
-        return `${yyyy}-${mm}-${dd}`;
-      } catch { return iso; }
-    }
+  // ====== Filter Apply ======
+  function currentFilters(){
+    return {
+      len: $("#lenFilter").value,
+      period: $("#periodFilter").value,
+      tier: $("#ratioTierFilter").value,
+      sort: $("#sortMode").value,
+    };
+  }
 
-    function parseISODuration(iso) {
-      if (!iso || typeof iso !== "string") return "-";
-      const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-      if (!m) return iso;
-      const h = Number(m[1] || 0);
-      const min = Number(m[2] || 0);
-      const s = Number(m[3] || 0);
-      const hh = h > 0 ? String(h).padStart(2,"0") + ":" : "";
-      const mm = String(min).padStart(2,"0");
-      const ss = String(s).padStart(2,"0");
-      return hh + mm + ":" + ss;
-    }
+  function applyFilters(){
+    const f = currentFilters();
+    const start = getPeriodStart(f.period);
 
-    function toNum(n) {
-      if (n === undefined || n === null) return null;
-      const x = Number(n);
-      return Number.isFinite(x) ? x : null;
-    }
+    let out = [...itemsAll];
 
-    function prettyNum(n) {
-      const x = toNum(n);
-      if (x === null) return "-";
-      return x.toLocaleString("ko-KR");
-    }
-
-    function pickThumb(snippet) {
-      const t = snippet?.thumbnails;
-      return t?.medium?.url || t?.high?.url || t?.default?.url || "";
-    }
-
-    function getApiKey() {
-      return (apiKeyInput.value || "").trim();
-    }
-
-    function loadKeyFromStorage() {
-      const saved = localStorage.getItem("YT_API_KEY") || "";
-      if (saved) apiKeyInput.value = saved;
-    }
-    function saveKeyToStorage() {
-      const k = getApiKey();
-      if (!k) { setMessage("warn", "API 키가 비어 있습니다."); return; }
-      localStorage.setItem("YT_API_KEY", k);
-      setMessage("good", "API 키를 저장했습니다.");
-      setTimeout(() => setMessage(null, ""), 1500);
-    }
-    function clearKeyFromStorage() {
-      localStorage.removeItem("YT_API_KEY");
-      apiKeyInput.value = "";
-      setMessage("good", "API 키를 삭제했습니다.");
-      setTimeout(() => setMessage(null, ""), 1500);
-    }
-
-    function setActiveTab(type) {
-      activeType = type;
-      const isVideo = type === "video";
-      tabVideo.classList.toggle("active", isVideo);
-      tabChannel.classList.toggle("active", !isVideo);
-      tabVideo.setAttribute("aria-selected", String(isVideo));
-      tabChannel.setAttribute("aria-selected", String(!isVideo));
-      el("resultHint").textContent = isVideo
-        ? "영상 결과를 클릭하면 태그/통계/길이 등을 확인할 수 있어요."
-        : "채널 결과를 클릭하면 구독자/조회수/채널 설명 등을 확인할 수 있어요.";
-    }
-
-    async function ytFetch(endpoint, params) {
-      const key = getApiKey();
-      if (!key) throw new Error("API_KEY_MISSING");
-
-      const url = new URL(YT_BASE + endpoint);
-      Object.entries(params || {}).forEach(([k, v]) => {
-        if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
+    // period
+    if(start){
+      out = out.filter(it => {
+        const d = it.publishedAt ? new Date(it.publishedAt) : null;
+        return d && d >= start;
       });
-      url.searchParams.set("key", key);
-
-      const res = await fetch(url.toString(), { method: "GET" });
-      let data = null;
-      try { data = await res.json(); } catch {}
-      if (!res.ok) {
-        const reason = data?.error?.errors?.[0]?.reason || data?.error?.message || ("HTTP_" + res.status);
-        const msg = data?.error?.message || "요청 실패";
-        const err = new Error(msg);
-        err.ytReason = reason;
-        err.httpStatus = res.status;
-        err.payload = data;
-        throw err;
-      }
-      return data;
     }
 
-    async function searchList({ q, type, order, maxResults, pageToken }) {
-      return ytFetch("/search", { part:"snippet", q, type, order, maxResults, pageToken });
+    // length
+    if(f.len !== "all"){
+      out = out.filter(it => {
+        const s = it.durationSeconds;
+        if(!Number.isFinite(s)) return false;
+        return f.len === "short" ? (s < 60) : (s >= 60);
+      });
     }
 
-    async function videosListByIds(ids) {
-      return ytFetch("/videos", { part:"snippet,contentDetails,statistics", id: ids.join(","), maxResults:50 });
-    }
-    async function channelsListByIds(ids) {
-      return ytFetch("/channels", { part:"snippet,statistics,brandingSettings", id: ids.join(","), maxResults:50 });
-    }
-
-    function mergeVideoResults(searchItems, videoItems) {
-      const byId = new Map();
-      for (const v of (videoItems || [])) byId.set(v.id, v);
-
-      const merged = [];
-      for (const s of (searchItems || [])) {
-        const vid = s?.id?.videoId;
-        const v = byId.get(vid);
-        const snippet = v?.snippet || s?.snippet || {};
-        const tags = Array.isArray(snippet?.tags) ? snippet.tags : [];
-        merged.push({
-          kind:"video",
-          id: vid,
-          title: snippet?.title || "(제목 없음)",
-          description: snippet?.description || "",
-          tags,
-          channelTitle: snippet?.channelTitle || "",
-          channelId: snippet?.channelId || "",
-          publishedAt: snippet?.publishedAt || "",
-          thumbnail: pickThumb(snippet),
-          url: vid ? `https://www.youtube.com/watch?v=${encodeURIComponent(vid)}` : "",
-          categoryId: snippet?.categoryId || "",
-          duration: parseISODuration(v?.contentDetails?.duration),
-          stats: {
-            viewCount: v?.statistics?.viewCount ?? null,
-            likeCount: v?.statistics?.likeCount ?? null,
-            commentCount: v?.statistics?.commentCount ?? null
-          },
-          _raw: { search:s, detail:v }
-        });
-      }
-      return merged;
+    // ratio tier
+    if(f.tier !== "all"){
+      out = out.filter(it => {
+        if(f.tier === "na") return it.ratioTier == null;
+        return Number(it.ratioTier) === Number(f.tier);
+      });
     }
 
-    function mergeChannelResults(searchItems, channelItems) {
-      const byId = new Map();
-      for (const c of (channelItems || [])) byId.set(c.id, c);
+    // sort
+    const byDate = (a,b)=> (new Date(b.publishedAt||0).getTime() - new Date(a.publishedAt||0).getTime());
+    const byViews = (a,b)=> (Number(b.viewCount||0) - Number(a.viewCount||0));
+    const byLikes = (a,b)=> (Number(b.likeCount||0) - Number(a.likeCount||0));
+    const byRatio = (a,b)=> (Number(b.ratio ?? -1) - Number(a.ratio ?? -1));
 
-      const merged = [];
-      for (const s of (searchItems || [])) {
-        const cid = s?.id?.channelId;
-        const c = byId.get(cid);
-        const snippet = c?.snippet || s?.snippet || {};
-        const branding = c?.brandingSettings || {};
-        const country = branding?.channel?.country || snippet?.country || "";
-        merged.push({
-          kind:"channel",
-          id: cid,
-          title: snippet?.title || "(채널명 없음)",
-          description: snippet?.description || "",
-          tags: [],
-          publishedAt: snippet?.publishedAt || "",
-          thumbnail: pickThumb(snippet),
-          url: cid ? `https://www.youtube.com/channel/${encodeURIComponent(cid)}` : "",
-          customUrl: snippet?.customUrl || "",
-          country: country || "",
-          stats: {
-            subscriberCount: c?.statistics?.subscriberCount ?? null,
-            viewCount: c?.statistics?.viewCount ?? null,
-            videoCount: c?.statistics?.videoCount ?? null
-          },
-          _raw: { search:s, detail:c }
-        });
-      }
-      return merged;
+    if(f.sort==="published_desc") out.sort(byDate);
+    else if(f.sort==="views_desc") out.sort(byViews);
+    else if(f.sort==="likes_desc") out.sort(byLikes);
+    else if(f.sort==="ratio_desc") out.sort(byRatio);
+
+    itemsFiltered = out;
+    renderList();
+    updateCount();
+  }
+
+  function updateCount(){
+    $("#countPill").innerHTML = `<strong>${fmtNum(itemsFiltered.length)}</strong>개`;
+  }
+
+  // ====== Rendering ======
+  function renderList(){
+    const list = $("#list");
+    list.innerHTML = "";
+
+    if(itemsFiltered.length === 0){
+      list.appendChild(Object.assign(document.createElement("div"), {className:"small", textContent:"결과가 없습니다. 검색하거나 필터를 조정해보세요."}));
+      return;
     }
 
-    function renderCards(list) {
-      cardsWrap.innerHTML = "";
-      if (!list || list.length === 0) {
-        cardsWrap.innerHTML = `<div class="msg">결과가 없습니다. 검색어를 바꾸거나 옵션을 조정해보세요.</div>`;
-        return;
-      }
+    if(viewMode === "table"){
+      // Table-like list
+      const box = document.createElement("div");
+      box.className = "panel";
+      box.style.borderRadius = "16px";
+      box.style.boxShadow = "none";
+      box.style.background = "rgba(18,27,59,.45)";
+      const hd = document.createElement("div");
+      hd.className = "hd";
+      hd.style.borderBottom = "1px solid rgba(255,255,255,.10)";
+      hd.innerHTML = `<div class="title">항목 (클릭: 상세)</div>`;
+      const bd = document.createElement("div");
+      bd.className = "bd";
 
-      for (const item of list) {
-        const thumb = item.thumbnail
-          ? `<img src="${escapeHtml(item.thumbnail)}" alt="thumbnail" loading="lazy" />`
-          : `No Image`;
+      itemsFiltered.forEach(it => {
+        const row = document.createElement("div");
+        row.className = "row";
+        row.style.padding = "10px 8px";
+        row.style.borderBottom = "1px solid rgba(255,255,255,.08)";
+        row.style.cursor = "pointer";
+        row.style.alignItems = "flex-start";
+        row.addEventListener("click", ()=>{ selected = it; renderDetail(it); });
 
-        const pills = [];
-        if (item.kind === "video") {
-          if (item.duration && item.duration !== "-") pills.push(`길이: ${item.duration}`);
-          if (item.categoryId) pills.push(`카테고리: ${item.categoryId}`);
-          if (item.stats?.viewCount != null) pills.push(`조회수: ${prettyNum(item.stats.viewCount)}`);
-          (item.tags || []).slice(0,3).forEach(t => pills.push(`#${t}`));
-        } else {
-          if (item.stats?.subscriberCount != null) pills.push(`구독자: ${prettyNum(item.stats.subscriberCount)}`);
-          if (item.stats?.viewCount != null) pills.push(`조회수: ${prettyNum(item.stats.viewCount)}`);
-          if (item.stats?.videoCount != null) pills.push(`영상수: ${prettyNum(item.stats.videoCount)}`);
-          if (item.customUrl) pills.push(item.customUrl);
-          if (item.country) pills.push(`국가: ${item.country}`);
-        }
+        row.appendChild(chip("YouTube", "acc"));
 
-        const card = document.createElement("div");
-        card.className = "card";
-        card.innerHTML = `
-          <div class="thumb">${thumb}</div>
-          <div class="meta">
-            <p class="t">${escapeHtml(item.title)}</p>
-            <div class="sub">
-              <span>게시: ${escapeHtml(fmtDate(item.publishedAt))}</span>
-              ${item.kind === "video"
-                ? `<span>채널: ${escapeHtml(item.channelTitle || "-")}</span>`
-                : `<span>채널ID: ${escapeHtml(item.id || "-")}</span>`
-              }
-            </div>
-            <div class="desc">${escapeHtml(item.description || "")}</div>
-            <div class="pillrow">
-              ${pills.slice(0,8).map(p => `<span class="pill" title="${escapeHtml(p)}">${escapeHtml(p)}</span>`).join("")}
-            </div>
-          </div>
+        const mid = document.createElement("div");
+        mid.style.flex = "1";
+        mid.style.minWidth = "240px";
+        mid.innerHTML = `
+          <div class="titleline">${esc(it.title || "(제목 없음)")}</div>
+          <div class="subline">${esc(it.channelTitle||"-")} · ${fmtDate(toDate(it.publishedAt))} · 조회수 ${fmtNum(it.viewCount)}</div>
         `;
-        card.addEventListener("click", () => renderDetail(item));
-        cardsWrap.appendChild(card);
-      }
+        row.appendChild(mid);
+
+        row.appendChild(lenChip(it.durationSeconds));
+        row.appendChild(ratioChip(it.ratioTier, it.ratio));
+
+        bd.appendChild(row);
+      });
+
+      box.appendChild(hd);
+      box.appendChild(bd);
+      list.appendChild(box);
+      return;
     }
 
-    function renderDetail(item) {
-      detailHint.textContent = item.kind === "video" ? "영상 상세" : "채널 상세";
-      const tags = (item.tags || []);
-      const tagText = tags.length ? tags.join(", ") : "(없음 또는 제공되지 않음)";
+    // card view
+    itemsFiltered.forEach(it => {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.addEventListener("click", ()=>{ selected = it; renderDetail(it); });
 
-      if (item.kind === "video") {
-        detailWrap.innerHTML = `
-          <div style="font-weight:700; margin-bottom:6px">${escapeHtml(item.title)}</div>
-          <div class="small" style="margin-bottom:10px">
-            채널: ${escapeHtml(item.channelTitle || "-")} · 게시일: ${escapeHtml(fmtDate(item.publishedAt))} · 길이: ${escapeHtml(item.duration || "-")}
-          </div>
-          <div class="row" style="margin-bottom:10px">
-            <a class="btn secondary" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">유튜브 열기</a>
-          </div>
-          <div class="hr"></div>
-          <div class="kv">
-            <div class="k">videoId</div><div class="v">${escapeHtml(item.id)}</div>
-            <div class="k">태그(tags)</div><div class="v">${escapeHtml(tagText)}</div>
-            <div class="k">categoryId</div><div class="v">${escapeHtml(item.categoryId || "-")}</div>
-            <div class="k">조회수</div><div class="v">${prettyNum(item.stats?.viewCount)}</div>
-            <div class="k">좋아요</div><div class="v">${prettyNum(item.stats?.likeCount)}</div>
-            <div class="k">댓글수</div><div class="v">${prettyNum(item.stats?.commentCount)}</div>
-            <div class="k">설명</div><div class="v">${escapeHtml(item.description || "-")}</div>
-          </div>
-        `;
+      const th = document.createElement("div");
+      th.className = "thumb";
+      th.innerHTML = it.thumbnail ? `<img src="${esc(it.thumbnail)}" alt="thumb"/>` : `<div class="small" style="padding:10px">No Image</div>`;
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.innerHTML = `
+        <div class="titleline">${esc(it.title || "(제목 없음)")}</div>
+        <div class="subline">
+          <span class="chip acc">YouTube</span>
+          <span class="chip">${esc(it.channelTitle||"-")}</span>
+          <span class="chip">업로드 ${fmtDate(toDate(it.publishedAt))}</span>
+          <span class="chip">조회수 ${fmtNum(it.viewCount)}</span>
+        </div>
+        <div class="desc">${esc(clampStr(it.description || "", 180))}</div>
+      `;
+
+      const chips = document.createElement("div");
+      chips.className = "chips";
+      chips.appendChild(lenChip(it.durationSeconds));
+      chips.appendChild(ratioChip(it.ratioTier, it.ratio));
+      if(it.tags && it.tags.length){
+        it.tags.slice(0,4).forEach(t=>chips.appendChild(chip("#"+t)));
       } else {
-        detailWrap.innerHTML = `
-          <div style="font-weight:700; margin-bottom:6px">${escapeHtml(item.title)}</div>
-          <div class="small" style="margin-bottom:10px">
-            생성일: ${escapeHtml(fmtDate(item.publishedAt))} ${item.country ? " · 국가: " + escapeHtml(item.country) : ""}
-          </div>
-          <div class="row" style="margin-bottom:10px">
-            <a class="btn secondary" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">채널 열기</a>
-          </div>
-          <div class="hr"></div>
-          <div class="kv">
-            <div class="k">channelId</div><div class="v">${escapeHtml(item.id)}</div>
-            <div class="k">customUrl</div><div class="v">${escapeHtml(item.customUrl || "-")}</div>
-            <div class="k">구독자</div><div class="v">${prettyNum(item.stats?.subscriberCount)}</div>
-            <div class="k">조회수</div><div class="v">${prettyNum(item.stats?.viewCount)}</div>
-            <div class="k">영상수</div><div class="v">${prettyNum(item.stats?.videoCount)}</div>
-            <div class="k">설명</div><div class="v">${escapeHtml(item.description || "-")}</div>
-            <div class="k">태그</div><div class="v">(채널 태그는 API 기본 응답에서 제공되지 않는 경우가 많습니다)</div>
-          </div>
-        `;
+        chips.appendChild(chip("태그 없음","bad"));
       }
 
-      if (jsonToggle.checked && lastCombinedPayload) {
-        jsonWrap.style.display = "block";
-        jsonPre.textContent = JSON.stringify({ selected: item._raw, combined: lastCombinedPayload }, null, 2);
-      } else {
-        jsonWrap.style.display = "none";
-        jsonPre.textContent = "{}";
-      }
+      const stats = document.createElement("div");
+      stats.className = "statrow";
+      stats.innerHTML = `
+        <span class="stat">👍 ${fmtNum(it.likeCount)}</span>
+        <span class="stat">💬 ${fmtNum(it.commentCount)}</span>
+        <span class="stat">👥 ${fmtNum(it.subscriberCount)}</span>
+      `;
+
+      meta.appendChild(chips);
+      meta.appendChild(stats);
+
+      card.appendChild(th);
+      card.appendChild(meta);
+      $("#list").appendChild(card);
+    });
+  }
+
+  function renderDetail(it){
+    const box = $("#detail");
+    box.innerHTML = "";
+    if(!it){
+      box.innerHTML = `<div class="small">목록에서 항목을 클릭하면 상세가 표시됩니다.</div>`;
+      return;
     }
 
-    function renderJsonGlobal() {
-      if (!jsonToggle.checked) {
-        jsonWrap.style.display = "none";
-        jsonPre.textContent = "{}";
+    const title = document.createElement("h3");
+    title.className = "detailTitle";
+    title.textContent = it.title || "(제목 없음)";
+
+    const open = document.createElement("a");
+    open.href = it.url || "#";
+    open.target = "_blank";
+    open.rel = "noopener";
+    open.textContent = "원본 열기 ↗";
+
+    const head = document.createElement("div");
+    head.className = "row";
+    head.style.justifyContent = "space-between";
+    head.style.alignItems = "flex-start";
+    const left = document.createElement("div");
+    left.appendChild(title);
+    left.appendChild(Object.assign(document.createElement("div"), {className:"small", textContent: it.channelTitle || "-"}));
+    head.appendChild(left);
+    head.appendChild(open);
+
+    const kv = document.createElement("div");
+    kv.className = "kv";
+    kv.innerHTML = `
+      <div class="k">업로드</div><div class="v">${fmtDate(toDate(it.publishedAt))}</div>
+      <div class="k">길이</div><div class="v">${fmtSeconds(it.durationSeconds)}</div>
+      <div class="k">조회수</div><div class="v">${fmtNum(it.viewCount)}</div>
+      <div class="k">좋아요</div><div class="v">${fmtNum(it.likeCount)}</div>
+      <div class="k">댓글</div><div class="v">${fmtNum(it.commentCount)}</div>
+      <div class="k">구독자</div><div class="v">${fmtNum(it.subscriberCount)}</div>
+      <div class="k">ratio</div><div class="v">${it.ratioTier==null ? "계산불가" : `${it.ratio.toFixed(2)} (${it.ratioTier}단계)`}</div>
+      <div class="k">태그</div><div class="v">${(it.tags && it.tags.length) ? esc(it.tags.join(", ")) : "없음"}</div>
+    `;
+
+    const desc = document.createElement("div");
+    desc.className = "small";
+    desc.style.whiteSpace = "pre-wrap";
+    desc.style.color = "var(--sub)";
+    desc.style.marginTop = "10px";
+    desc.textContent = it.description || "";
+
+    box.appendChild(head);
+    box.appendChild(kv);
+    box.appendChild(desc);
+
+    selected = it;
+  }
+
+  // ====== Export CSV (Excel friendly) ======
+  function toCSV(rows){
+    if(!rows.length) return "";
+    const keys = Object.keys(rows[0]);
+    const escCell = (v) => {
+      const s = (v==null) ? "" : String(v);
+      const t = s.replace(/\r?\n/g, "\\n");
+      return `"${t.replace(/"/g,'""')}"`;
+    };
+    const lines = [];
+    lines.push(keys.map(escCell).join(","));
+    for(const r of rows){
+      lines.push(keys.map(k => escCell(r[k])).join(","));
+    }
+    // UTF-8 BOM for Excel
+    return "\uFEFF" + lines.join("\n");
+  }
+
+  function downloadText(text, filename, mime){
+    const blob = new Blob([text], {type:mime});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 5000);
+  }
+
+  function exportExcelCSV(){
+    if(!itemsFiltered.length){
+      setStatus("다운로드할 결과가 없습니다.", "warn");
+      return;
+    }
+    const rows = itemsFiltered.map(it => ({
+      platform: "YouTube",
+      title: it.title,
+      description: it.description,
+      tags: (it.tags||[]).join("|"),
+      channelTitle: it.channelTitle,
+      channelId: it.channelId,
+      publishedAt: it.publishedAt,
+      duration: fmtSeconds(it.durationSeconds),
+      viewCount: it.viewCount,
+      likeCount: it.likeCount,
+      commentCount: it.commentCount,
+      subscriberCount: it.subscriberCount,
+      ratio: (it.ratioTier==null ? "" : it.ratio.toFixed(4)),
+      ratioTier: (it.ratioTier==null ? "" : it.ratioTier),
+      url: it.url
+    }));
+    const csv = toCSV(rows);
+    const name = `youtube_export_${new Date().toISOString().slice(0,10)}.csv`;
+    downloadText(csv, name, "text/csv;charset=utf-8");
+    setStatus("CSV 다운로드 시작", "ok");
+  }
+
+  // ====== YouTube fetch flow ======
+  async function search({direction="new"}={}){
+    hideErr(); hideHelp();
+    setStatus("로딩 중…", "warn");
+
+    const key = ytKey();
+    if(!key){ showErr("YouTube API Key를 입력하세요."); setStatus("대기"); return; }
+
+    const q = $("#query").value.trim();
+    if(!q){ showErr("검색어를 입력하세요."); setStatus("대기"); return; }
+
+    const type = $("#searchType").value;
+    const maxResults = $("#maxResults").value;
+
+    const period = $("#periodFilter").value;
+    const start = getPeriodStart(period);
+
+    let pageToken = null;
+    if(direction==="next") pageToken = page.next;
+    if(direction==="prev") pageToken = page.prev;
+    if(direction==="new"){ page.next=null; page.prev=null; pageToken=null; }
+
+    $("#spin").style.display = "";
+    $("#searchBtn").disabled = true;
+
+    try{
+      // search.list
+      const su = new URL("https://www.googleapis.com/youtube/v3/search");
+      su.searchParams.set("part", "snippet");
+      su.searchParams.set("q", q);
+      su.searchParams.set("type", type);
+      su.searchParams.set("maxResults", maxResults);
+      if(pageToken) su.searchParams.set("pageToken", pageToken);
+      if(start) su.searchParams.set("publishedAfter", start.toISOString());
+
+      const sUrl = withKey(su.toString());
+      const sRes = await fetchJSON(sUrl);
+
+      if(!sRes.ok){
+        const msg = classifyYtError(sRes);
+        showErr(msg);
+        if(sRes.status===0){
+          showHelp("네트워크/CORS로 막혔을 수 있어요. GitHub Pages(https)에서 실행 중인지 확인하고, 키 제한(HTTP referrer)이 너무 빡빡한지 점검해보세요.");
+        }
+        setStatus("실패", "err");
         return;
       }
-      jsonWrap.style.display = "block";
-      jsonPre.textContent = JSON.stringify(lastCombinedPayload || {}, null, 2);
-    }
 
-    function downloadCSV(rows, filename) {
-      const csv = rows.map(r => r.map(cell => {
-        const s = String(cell ?? "");
-        const needsQuote = /[",\n\r]/.test(s);
-        const escaped = s.replaceAll('"', '""');
-        return needsQuote ? `"${escaped}"` : escaped;
-      }).join(",")).join("\n");
+      const sData = sRes.json || {};
+      lastRaw = {step:"search.list", response:sData};
 
-      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    }
+      page.next = sData.nextPageToken || null;
+      page.prev = sData.prevPageToken || null;
+      $("#nextBtn").disabled = !page.next;
+      $("#prevBtn").disabled = !page.prev;
 
-    function exportCurrentToCSV() {
-      // ✅ 결과가 없어도 버튼은 항상 눌림 → 여기서 안내
-      if (!currentResults || currentResults.length === 0) {
-        setMessage("warn", "내보낼 결과가 없습니다. 먼저 검색을 실행하세요.");
+      if(type === "channel"){
+        // channel search result -> channels.list details
+        const channelIds = (sData.items||[]).map(it => it.id?.channelId).filter(Boolean);
+        const chMap = await fetchChannels(channelIds);
+        const unified = [...chMap.values()].map(ch => {
+          const sn = ch.snippet || {};
+          const st = ch.statistics || {};
+          return {
+            id: ch.id,
+            title: sn.title || "",
+            description: sn.description || "",
+            tags: [],
+            channelTitle: sn.title || "",
+            channelId: ch.id,
+            publishedAt: sn.publishedAt || null,
+            thumbnail: pickThumb(sn.thumbnails),
+            url: ch.id ? `https://www.youtube.com/channel/${encodeURIComponent(ch.id)}` : "",
+            durationSeconds: null,
+            viewCount: Number(st.viewCount)||0,
+            likeCount: null,
+            commentCount: null,
+            subscriberCount: Number(st.subscriberCount)||null,
+            ratio: null,
+            ratioTier: null,
+            raw:{channel:ch}
+          };
+        });
+
+        itemsAll = unified;
+        applyFilters();
+        renderDetail(null);
+        setStatus(`채널 ${unified.length}개`, "ok");
+        showHelp("채널 검색 결과는 숏폼/롱폼/ratio 필터가 정확히 적용되지 않을 수 있어요. 영상 검색을 추천합니다.");
+        lastRaw = {...lastRaw, step2:"channels.list", channels:[...chMap.values()]};
         return;
       }
-      const isVideo = currentResults[0]?.kind === "video";
-      const headers = isVideo
-        ? ["kind","videoId","title","channelTitle","channelId","publishedAt","duration","categoryId","viewCount","likeCount","commentCount","tags","url","description"]
-        : ["kind","channelId","title","publishedAt","subscriberCount","viewCount","videoCount","country","customUrl","url","description"];
 
-      const rows = [headers];
-      for (const it of currentResults) {
-        if (isVideo) {
-          rows.push([
-            it.kind,
-            it.id,
-            it.title,
-            it.channelTitle,
-            it.channelId,
-            it.publishedAt,
-            it.duration,
-            it.categoryId,
-            it.stats?.viewCount ?? "",
-            it.stats?.likeCount ?? "",
-            it.stats?.commentCount ?? "",
-            (it.tags || []).join("|"),
-            it.url,
-            it.description
-          ]);
-        } else {
-          rows.push([
-            it.kind,
-            it.id,
-            it.title,
-            it.publishedAt,
-            it.stats?.subscriberCount ?? "",
-            it.stats?.viewCount ?? "",
-            it.stats?.videoCount ?? "",
-            it.country ?? "",
-            it.customUrl ?? "",
-            it.url,
-            it.description
-          ]);
-        }
+      // video search result -> videos.list
+      const videoIds = (sData.items||[]).map(it => it.id?.videoId).filter(Boolean);
+      if(videoIds.length === 0){
+        itemsAll = [];
+        applyFilters();
+        renderDetail(null);
+        setStatus("결과 없음", "warn");
+        return;
       }
-      const stamp = new Date().toISOString().slice(0,19).replaceAll(":","").replace("T","_");
-      downloadCSV(rows, `youtube_${isVideo ? "videos" : "channels"}_${stamp}.csv`);
+
+      const videos = await fetchVideos(videoIds);
+      if(!videos){ setStatus("실패", "err"); return; }
+
+      // dedupe channelIds -> channels.list
+      const channelIds = [...new Set(videos.map(v => v.snippet?.channelId).filter(Boolean))];
+      const chMap = await fetchChannels(channelIds);
+
+      // merge
+      const unified = videos.map(v => {
+        const sn = v.snippet || {};
+        const st = v.statistics || {};
+        const cd = v.contentDetails || {};
+        const dur = parseISODurationToSeconds(cd.duration);
+        const ch = chMap.get(sn.channelId) || null;
+        const subs = ch ? Number(ch.statistics?.subscriberCount) : null;
+        const {ratio, tier} = calcRatioTier(st.viewCount, subs);
+
+        return {
+          id: v.id,
+          title: sn.title || "",
+          description: sn.description || "",
+          tags: Array.isArray(sn.tags) ? sn.tags.map(t=>String(t)) : [],
+          channelTitle: sn.channelTitle || "",
+          channelId: sn.channelId || "",
+          publishedAt: sn.publishedAt || null,
+          thumbnail: pickThumb(sn.thumbnails),
+          url: v.id ? `https://www.youtube.com/watch?v=${encodeURIComponent(v.id)}` : "",
+          durationSeconds: Number.isFinite(dur) ? dur : null,
+          viewCount: Number(st.viewCount)||0,
+          likeCount: Number(st.likeCount)||0,
+          commentCount: Number(st.commentCount)||0,
+          subscriberCount: Number.isFinite(subs) ? subs : null,
+          ratio: (tier==null ? null : ratio),
+          ratioTier: tier,
+          raw: {video:v, channel:ch}
+        };
+      });
+
+      itemsAll = unified;
+      applyFilters();
+      renderDetail(null);
+      setStatus(`영상 ${unified.length}개`, "ok");
+      lastRaw = {...lastRaw, step2:"videos.list+channels.list", videos, channels:[...chMap.values()]};
+
+    } finally {
+      $("#spin").style.display = "none";
+      $("#searchBtn").disabled = false;
     }
+  }
 
-    async function runSearch({ resetPage = true } = {}) {
-      setMessage(null, "");
-      detailHint.textContent = "선택한 항목 없음";
-      detailWrap.textContent = "왼쪽 목록에서 항목을 선택하세요.";
-      jsonWrap.style.display = "none";
+  function pickThumb(th){
+    if(!th) return "";
+    return th.maxres?.url || th.high?.url || th.medium?.url || th.default?.url || "";
+  }
 
-      const q = (qInput.value || "").trim();
-      if (!q) { setMessage("warn", "검색어를 입력하세요."); return; }
-      if (!getApiKey()) { setMessage("warn", "API 키를 입력하고 저장하세요."); return; }
-
-      if (resetPage) pageToken = "";
-      const order = orderSel.value;
-      const maxResults = maxResultsSel.value;
-
-      try {
-        setStatus("검색 중...", true);
-        searchBtn.disabled = true;
-        nextBtn.disabled = true;
-        prevBtn.disabled = true;
-        cardsWrap.innerHTML = `<div class="msg"><span class="spin"></span>불러오는 중...</div>`;
-
-        const searchPayload = await searchList({ q, type: activeType, order, maxResults, pageToken });
-
-        nextPageToken = searchPayload?.nextPageToken || "";
-        prevPageToken = searchPayload?.prevPageToken || "";
-        nextBtn.disabled = !nextPageToken;
-        prevBtn.disabled = !prevPageToken;
-
-        const items = searchPayload?.items || [];
-        if (items.length === 0) {
-          currentResults = [];
-          lastCombinedPayload = { search: searchPayload, details: null, merged: [] };
-          renderCards([]);
-          renderJsonGlobal();
-          countText.textContent = "결과: 0";
-          setStatus("완료");
-          return;
-        }
-
-        let detailsPayload = null;
-        let merged = [];
-
-        if (activeType === "video") {
-          const ids = items.map(x => x?.id?.videoId).filter(Boolean);
-          detailsPayload = await videosListByIds(ids.slice(0, 50));
-          merged = mergeVideoResults(items, detailsPayload?.items || []);
-        } else {
-          const ids = items.map(x => x?.id?.channelId).filter(Boolean);
-          detailsPayload = await channelsListByIds(ids.slice(0, 50));
-          merged = mergeChannelResults(items, detailsPayload?.items || []);
-        }
-
-        currentResults = merged;
-        lastCombinedPayload = { search: searchPayload, details: detailsPayload, merged };
-
-        renderCards(merged);
-        renderJsonGlobal();
-        countText.textContent = `결과: ${merged.length}`;
-        setStatus("완료");
-      } catch (err) {
-        console.error(err);
-        setMessage(...Object.values(friendlyError(err)));
-        cardsWrap.innerHTML = `<div class="msg bad">오류가 발생했습니다. 상단 메시지를 확인하세요.</div>`;
-        setStatus("오류");
-      } finally {
-        searchBtn.disabled = false;
+  async function fetchVideos(ids){
+    const all = [];
+    for(let i=0; i<ids.length; i+=50){
+      const chunk = ids.slice(i, i+50);
+      const u = new URL("https://www.googleapis.com/youtube/v3/videos");
+      u.searchParams.set("part", "snippet,statistics,contentDetails");
+      u.searchParams.set("id", chunk.join(","));
+      const url = withKey(u.toString());
+      const res = await fetchJSON(url);
+      if(!res.ok){
+        showErr(classifyYtError(res));
+        return null;
       }
+      all.push(...(res.json?.items || []));
     }
+    return all;
+  }
 
-    function friendlyError(err) {
-      const reason = err?.ytReason || "";
-      const status = err?.httpStatus;
-
-      if (err?.message === "API_KEY_MISSING" || reason === "keyInvalid") {
-        return { 0: "bad", 1: "API 키가 없거나 유효하지 않습니다. 키를 확인하세요." };
+  async function fetchChannels(ids){
+    const map = new Map();
+    if(!ids || !ids.length) return map;
+    for(let i=0; i<ids.length; i+=50){
+      const chunk = ids.slice(i, i+50);
+      const u = new URL("https://www.googleapis.com/youtube/v3/channels");
+      u.searchParams.set("part", "snippet,statistics");
+      u.searchParams.set("id", chunk.join(","));
+      const url = withKey(u.toString());
+      const res = await fetchJSON(url);
+      if(!res.ok){
+        showErr(classifyYtError(res));
+        return map;
       }
-      if (reason === "quotaExceeded" || reason === "dailyLimitExceeded") {
-        return { 0: "bad", 1: "할당량(Quota)을 초과했습니다. 내일 다시 시도하거나 다른 키를 사용하세요." };
-      }
-      if (reason === "accessNotConfigured") {
-        return { 0: "bad", 1: "YouTube Data API v3가 활성화되지 않았습니다. 콘솔에서 API 사용 설정을 확인하세요." };
-      }
-      if (reason === "keyRestricted") {
-        return { 0: "bad", 1: "API 키 제한(Referrer/IP) 때문에 호출이 거부되었습니다. 제한 설정을 확인하세요." };
-      }
-      if (status === 403) {
-        return { 0: "bad", 1: "권한 문제(403)입니다. API 활성화/키 제한/할당량 등을 확인하세요." };
-      }
-      if (String(err?.message || "").toLowerCase().includes("failed to fetch")) {
-        return { 0: "warn", 1: "네트워크 요청이 실패했습니다. (CORS/네트워크 문제 가능) GitHub Pages(https)에서 실행 중인지 확인하세요." };
-      }
-      return { 0: "bad", 1: `오류: ${err?.message || "알 수 없는 오류"} (reason: ${reason || "-"})` };
+      (res.json?.items || []).forEach(ch => map.set(ch.id, ch));
     }
+    return map;
+  }
 
-    function showHelp() {
-      const msg = `
-[GitHub Pages로 실행 추천]
-- file://(로컬 파일)보다 https(Pages)에서 실행이 안정적입니다.
+  // ====== Events ======
+  // load saved key
+  const savedKey = localStorage.getItem(LS_KEY);
+  if(savedKey) $("#apiKey").value = savedKey;
 
-[API 키 체크리스트]
-1) YouTube Data API v3 사용 설정(Enable)
-2) 키 제한(HTTP referrer)에 Pages 주소 추가
-   예: https://내아이디.github.io/* 또는 https://내아이디.github.io/저장소명/*
-3) API 제한에서 YouTube Data API v3만 허용
-      `.trim();
+  $("#saveKeyBtn").addEventListener("click", ()=>{
+    localStorage.setItem(LS_KEY, ytKey());
+    setStatus("키 저장 완료", "ok");
+  });
+  $("#delKeyBtn").addEventListener("click", ()=>{
+    localStorage.removeItem(LS_KEY);
+    $("#apiKey").value = "";
+    setStatus("키 삭제 완료", "ok");
+  });
 
-      setMessage("warn", msg);
-      window.scrollTo({ top: 0, behavior: "smooth" });
+  $("#searchBtn").addEventListener("click", ()=>search({direction:"new"}));
+  $("#nextBtn").addEventListener("click", ()=>search({direction:"next"}));
+  $("#prevBtn").addEventListener("click", ()=>search({direction:"prev"}));
+
+  $("#applyBtn").addEventListener("click", applyFilters);
+
+  $("#viewToggleBtn").addEventListener("click", ()=>{
+    viewMode = (viewMode==="card") ? "table" : "card";
+    renderList();
+    setStatus(viewMode==="card" ? "카드 보기" : "테이블 보기", "ok");
+  });
+
+  $("#exportBtn").addEventListener("click", exportExcelCSV);
+
+  $("#jsonToggleBtn").addEventListener("click", ()=>{
+    const box = $("#jsonBox");
+    const show = box.style.display !== "block";
+    box.style.display = show ? "block" : "none";
+    box.textContent = show ? JSON.stringify(lastRaw ?? {info:"아직 원본 데이터가 없습니다."}, null, 2) : "";
+  });
+
+  $("#copyUrlBtn").addEventListener("click", async ()=>{
+    if(!selected?.url){ setStatus("선택된 항목/URL이 없습니다.", "warn"); return; }
+    try{
+      await navigator.clipboard.writeText(selected.url);
+      setStatus("URL 복사 완료", "ok");
+    } catch {
+      setStatus("클립보드 복사 실패", "err");
     }
+  });
 
-    // 이벤트
-    saveKeyBtn.addEventListener("click", saveKeyToStorage);
-    clearKeyBtn.addEventListener("click", clearKeyFromStorage);
-    el("helpBtn").addEventListener("click", showHelp);
+  $("#closeDetailBtn").addEventListener("click", ()=>renderDetail(null));
 
-    tabVideo.addEventListener("click", () => setActiveTab("video"));
-    tabChannel.addEventListener("click", () => setActiveTab("channel"));
-    tabVideo.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") setActiveTab("video"); });
-    tabChannel.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") setActiveTab("channel"); });
+  $("#resetBtn").addEventListener("click", ()=>{
+    itemsAll = [];
+    itemsFiltered = [];
+    selected = null;
+    lastRaw = null;
+    page.next = null;
+    page.prev = null;
+    $("#nextBtn").disabled = true;
+    $("#prevBtn").disabled = true;
+    $("#jsonBox").style.display = "none";
+    $("#jsonBox").textContent = "";
+    renderList();
+    renderDetail(null);
+    updateCount();
+    hideErr(); hideHelp();
+    setStatus("초기화 완료", "ok");
+  });
 
-    searchBtn.addEventListener("click", () => runSearch({ resetPage: true }));
-    qInput.addEventListener("keydown", (e) => { if (e.key === "Enter") runSearch({ resetPage: true }); });
+  // apply on filter changes
+  ["#lenFilter","#periodFilter","#ratioTierFilter","#sortMode"].forEach(sel=>{
+    $(sel).addEventListener("change", applyFilters);
+  });
 
-    nextBtn.addEventListener("click", () => { if (!nextPageToken) return; pageToken = nextPageToken; runSearch({ resetPage: false }); });
-    prevBtn.addEventListener("click", () => { if (!prevPageToken) return; pageToken = prevPageToken; runSearch({ resetPage: false }); });
+  // init UI
+  renderList();
+  renderDetail(null);
+  updateCount();
+  setStatus("대기");
 
-    exportBtn.addEventListener("click", exportCurrentToCSV);
+})();
+</script>
 
-    jsonToggle.addEventListener("change", renderJsonGlobal);
-
-    // 초기화
-    loadKeyFromStorage();
-    setActiveTab("video");
-    setStatus("대기 중");
-    setMessage(null, "");
-  </script>
 </body>
 </html>
